@@ -26,6 +26,8 @@ ARG TARGETARCH
 ARG GOPROXY=https://goproxy.cn,https://proxy.golang.org,direct
 WORKDIR /src
 COPY go.mod go.sum ./
+# go.mod 里 replace 到本地 ./norma，下载依赖前必须先有它的 go.mod/go.sum
+COPY norma/go.mod norma/go.sum ./norma/
 RUN go mod download
 COPY . .
 # 前端静态产物从 web 阶段拷入（.dockerignore 已排除宿主 dist，不会冲突）
@@ -35,9 +37,12 @@ RUN CGO_ENABLED=0 GOARCH="${TARGETARCH}" go build -tags embedui -trimpath -o /ou
 ########## 阶段 3：运行镜像（同原版：工具 + Playwright 预装）##########
 FROM python:3.12-slim-bookworm
 ARG NPM_REGISTRY=https://registry.npmmirror.com
+# 浏览器下载镜像；镜像缺包（如新版本 linux-arm64）时下方会自动回退官方 CDN。
+# 置空则直接走官方：--build-arg PLAYWRIGHT_DOWNLOAD_HOST=
+ARG PLAYWRIGHT_DOWNLOAD_HOST=https://cdn.npmmirror.com/binaries/playwright
 # 运行层的全局 npm 装包与 chromium 下载同样走国内源（对全球网络同样可达）
 ENV npm_config_registry=$NPM_REGISTRY \
-    PLAYWRIGHT_DOWNLOAD_HOST=https://cdn.npmmirror.com/binaries/playwright
+    PLAYWRIGHT_DOWNLOAD_HOST=$PLAYWRIGHT_DOWNLOAD_HOST
 # 常用工具：ripgrep / curl / vim，加一批 recon 常备件（按需增删）。
 # Node 从 NodeSource 装 20.x：bookworm 自带的 apt nodejs 是 18，Playwright 要求 >=20。
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -53,7 +58,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # 这样容器内 MCP/CLI 首次启动即可用，不再联网下载浏览器。
 RUN npm install -g @playwright/mcp@latest @playwright/cli@latest playwright@latest \
     && playwright-cli --help \
-    && playwright install --with-deps chromium \
+    && { playwright install --with-deps chromium \
+         || { echo "镜像源缺少该浏览器包，回退到官方 CDN 重试"; \
+              env -u PLAYWRIGHT_DOWNLOAD_HOST playwright install --with-deps chromium; }; } \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 # 构建阶段产出的单二进制（内嵌前端）
